@@ -4,7 +4,9 @@
 
 This allows an ESP32 to emulate a mouse and does a jiggle and/or right click on random (configurable) intervals.
 
-Undetectable. This *is* a mouse.
+Undetectable.* This *is* a mouse.
+
+<small>*Nothing is undetectable really, depends how insane your org is.</small>
 
 ## Setup Instructions
 
