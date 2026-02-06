@@ -1,187 +1,159 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <BleMouse.h>
+#include <BleKeyboard.h>
 
-#define DEVICE_NAME "Microsoft Ergonomic Mouse"
+// --- CONFIGURATION ---
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1 
+#define BUTTON_PIN    0   // The BOOT button on most ESP32s
 
-#define X_RANDOM_RANGE 5
-#define Y_RANDOM_RANGE 5
-#define MIN_MOVE_INTERVAL 5000    // 5 seconds
-#define MAX_MOVE_INTERVAL 30000   // 30 seconds
-#define MIN_CLICK_INTERVAL 10000  // 10 seconds
-#define MAX_CLICK_INTERVAL 60000  // 60 seconds
-#define DISCONNECT_TIMEOUT 10000  // 10 seconds
+// Stealth & ID Settings (Logitech MX Master 3 Spoof)
+#define DEVICE_NAME   "MX Master 3" 
+#define DEVICE_MANUF  "Logitech"
+#define HID_VID       0x046D
+#define HID_PID       0xB023
 
-#define BOOT_BUTTON 0  // GPIO0 is typically the BOOT button on most ESP32 boards
+// --- GLOBAL OBJECTS ---
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+BleMouse bleMouse(DEVICE_NAME, DEVICE_MANUF, 100);
+BleKeyboard bleKeyboard(DEVICE_NAME, DEVICE_MANUF, 100);
 
-// Configuration variables
-bool enableMouseMovement = true;
-bool enableRightClick = false;
-
-// LED configuration
-#define USE_LED true  // Set to false if your board doesn't have an LED or you don't want to use it
-#define LED_PIN 2     // Change this to match your board's LED pin, if different
-
-BleMouse bleMouse(DEVICE_NAME);
-
-unsigned long lastMoveTime = 0;
-unsigned long lastClickTime = 0;
-unsigned long moveInterval = 0;
-unsigned long clickInterval = 0;
-unsigned long lastConnectedTime = 0;
-unsigned long lastDebounceTime = 0;
-bool wasConnected = false;
-bool lastButtonState = HIGH;
-bool buttonState;
-bool featuresActive = true;
-
-// Function prototypes
-void moveMouse();
-void rightClick();
-void checkConnectionAndReset();
-void checkButton();
-void updateLED();
-void printConfig();
-void wiggleMouse();
+// --- STATE TRACKING ---
+unsigned long lastActionTime = 0;
+unsigned long nextActionDelay = 5000; // Starts at 5 seconds
+bool isPaused = false;
+unsigned long pauseEndTime = 0;
 
 void setup() {
-  Serial.begin(115200);
-  Serial.println("Starting BLE Mouse Emulator");
+  // 1. Lower CPU speed to 80MHz for battery saving
+  setCpuFrequencyMhz(80);
 
-  pinMode(BOOT_BUTTON, INPUT_PULLUP);
+  // 2. Setup Screen
+  // Address 0x3C is standard for these generic OLEDs
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    for(;;); // Don't proceed, loop forever if screen fails
+  }
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0,0);
+  display.println("Initializing...");
+  display.println("Stealth Mode: ON");
+  display.display();
 
-  if (USE_LED) {
-    pinMode(LED_PIN, OUTPUT);
+  // 3. Setup Bluetooth with Spoofed ID
+  // Note: Library handling of VID/PID happens internally or via BLEDevice config
+  // For standard BleMouse/Keyboard libs, we set the name which is the most visible part.
+  bleMouse.begin();
+  bleKeyboard.begin();
+  
+  // 4. Setup Button
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // Random seed from unconnected pin noise
+  randomSeed(analogRead(34));
+}
+
+void updateScreen(String status, String action) {
+  display.clearDisplay();
+  
+  // Screensaver logic: Randomize text position slightly to prevent burn-in
+  int x = random(0, 10);
+  int y = random(0, 20);
+  
+  display.setCursor(x, y);
+  display.setTextSize(1);
+  display.println("Running: " + String(DEVICE_NAME));
+  
+  display.setCursor(x, y + 15);
+  display.println("Status: " + status);
+  
+  display.setCursor(x, y + 30);
+  display.println("Last: " + action);
+
+  // Battery simulation (Visual only)
+  display.setCursor(x, y + 45);
+  display.println("Battery: Optimal");
+  
+  display.display();
+}
+
+void performAction() {
+  if (!bleMouse.isConnected()) return;
+
+  int choice = random(0, 100);
+  String actionName = "";
+
+  if (choice < 70) {
+    // 70% Chance: Micro Mouse Jiggle
+    // Move slightly, wait briefly, move back (Zero-sum movement)
+    int xMove = random(-2, 3); // -2 to +2
+    int yMove = random(-2, 3);
+    
+    bleMouse.move(xMove, yMove);
+    delay(random(50, 150)); // Tiny human-like micro-pause
+    bleMouse.move(-xMove, -yMove); // Return to start
+    
+    actionName = "Mouse Micro-Move";
+  } 
+  else if (choice < 90) {
+    // 20% Chance: Ghost Key Press (F15)
+    // F15 is rarely used by apps but registers as activity
+    bleKeyboard.write(KEY_F15);
+    actionName = "Key: F15";
+  }
+  else {
+    // 10% Chance: Mouse Scroll
+    // Scrolling 1 unit is very subtle
+    bleMouse.move(0, 0, random(-1, 2)); 
+    actionName = "Mouse Scroll";
   }
 
-  bleMouse.begin();
-
-  // Initialize random intervals
-  moveInterval = random(MIN_MOVE_INTERVAL, MAX_MOVE_INTERVAL);
-  clickInterval = random(MIN_CLICK_INTERVAL, MAX_CLICK_INTERVAL);
-
-  updateLED();
-  printConfig();
+  updateScreen("Active", actionName);
 }
 
 void loop() {
-  checkButton();
+  unsigned long currentMillis = millis();
 
-  if (bleMouse.isConnected()) {
-    if (!wasConnected) {
-      Serial.println("BLE Mouse connected");
-      wasConnected = true;
-      wiggleMouse(); // Wiggle mouse on connection
-    }
-    lastConnectedTime = millis();
-
-    if (featuresActive) {
-      unsigned long currentTime = millis();
-
-      // Check if it's time to move the mouse
-      if (enableMouseMovement && currentTime - lastMoveTime >= moveInterval) {
-        moveMouse();
-        lastMoveTime = currentTime;
-        moveInterval = random(MIN_MOVE_INTERVAL, MAX_MOVE_INTERVAL);
-      }
-
-      // Check if it's time to right-click
-      if (enableRightClick && currentTime - lastClickTime >= clickInterval) {
-        rightClick();
-        lastClickTime = currentTime;
-        clickInterval = random(MIN_CLICK_INTERVAL, MAX_CLICK_INTERVAL);
-      }
-    }
-  } else {
-    checkConnectionAndReset();
-  }
-}
-
-void moveMouse() {
-  int x = random(-X_RANDOM_RANGE, X_RANDOM_RANGE + 1);
-  int y = random(-Y_RANDOM_RANGE, Y_RANDOM_RANGE + 1);
-
-  bleMouse.move(x, y);
-  Serial.printf("Moved mouse: x=%d, y=%d\n", x, y);
-}
-
-void rightClick() {
-  bleMouse.click(MOUSE_RIGHT);
-  Serial.println("Performed right-click");
-}
-
-void checkConnectionAndReset() {
-  if (wasConnected) {
-    Serial.println("BLE Mouse disconnected");
-    wasConnected = false;
+  // 1. Connection Check
+  if (!bleMouse.isConnected()) {
+    updateScreen("Disconnected", "Waiting for PC...");
+    delay(1000);
+    return;
   }
 
-  if (millis() - lastConnectedTime > DISCONNECT_TIMEOUT) {
-    Serial.println("Connection timeout. Restarting ESP32...");
-    delay(1000);  // Short delay to allow serial message to be sent
-    ESP.restart();
-  } else {
-    Serial.println("Waiting for connection...");
-    delay(1000);  // Check connection status every second
-  }
-}
-
-void checkButton() {
-  int reading = digitalRead(BOOT_BUTTON);
-
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
-  }
-
-  if ((millis() - lastDebounceTime) > 50) {
-    if (reading != buttonState) {
-      buttonState = reading;
-      if (buttonState == LOW) {
-        // Toggle features on/off
-        featuresActive = !featuresActive;
-        updateLED();
-        printConfig();
-        if (featuresActive && bleMouse.isConnected()) {
-          wiggleMouse(); // Wiggle mouse when features are enabled
-        }
-      }
+  // 2. Pause Logic (Simulating "Thinking" or Reading)
+  if (isPaused) {
+    if (currentMillis > pauseEndTime) {
+      isPaused = false;
+      updateScreen("Resuming...", "Work Mode");
+    } else {
+      // Just update screen occasionally during pause
+      if (currentMillis % 5000 < 100) updateScreen("Idling...", "Human Break");
+      return; 
     }
   }
 
-  lastButtonState = reading;
-}
+  // 3. Trigger Action
+  if (currentMillis - lastActionTime > nextActionDelay) {
+    performAction();
+    lastActionTime = currentMillis;
+    
+    // Set next delay: Random between 10 seconds and 3 minutes
+    // This irregularity makes it harder to detect than a fixed "every 60s" loop.
+    nextActionDelay = random(10000, 180000); 
 
-void updateLED() {
-  if (USE_LED) {
-    digitalWrite(LED_PIN, featuresActive ? HIGH : LOW);
-  }
-}
-
-void printConfig() {
-  Serial.println("Configuration:");
-  Serial.print("Features: ");
-  Serial.println(featuresActive ? "Active" : "Inactive");
-  Serial.print("Mouse Movement: ");
-  Serial.println(featuresActive && enableMouseMovement ? "Enabled" : "Disabled");
-  Serial.print("Right Click: ");
-  Serial.println(featuresActive && enableRightClick ? "Enabled" : "Disabled");
-  Serial.print("LED State: ");
-  Serial.println(featuresActive ? "ON" : "OFF");
-}
-
-void wiggleMouse() {
-  Serial.println("Performing wiggle");
-  int wiggleCount = random(3, 6);  // Random number of wiggle movements
-  int wiggleDelay = 50;
-
-  for (int i = 0; i < wiggleCount; i++) {
-    int x = random(-20, 21);  // Random x movement between -20 and 20
-    int y = random(-20, 21);  // Random y movement between -20 and 20
-
-    bleMouse.move(x, y);
-    delay(wiggleDelay);
-
-    // Move back, but not exactly to the original position
-    bleMouse.move(-x + random(-5, 6), -y + random(-5, 6));
-    delay(wiggleDelay);
+    // 4. Randomly decide to take a "Break" (simulated idle time)
+    // 5% chance after every action to pause for 1-5 minutes
+    if (random(0, 100) < 5) {
+      isPaused = true;
+      long breakDuration = random(60000, 300000); // 1 to 5 minutes
+      pauseEndTime = currentMillis + breakDuration;
+      updateScreen("Taking Break", String(breakDuration/1000) + "s");
+    }
   }
 }
