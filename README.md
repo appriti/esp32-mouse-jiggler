@@ -1,6 +1,6 @@
 # Stealth ESP32 BLE Mouse Jiggler (OLED Edition)
 
-A highly advanced, "undetectable" Bluetooth LE Mouse Jiggler based on the ESP32. This fork significantly upgrades the original project with **Hardware ID Spoofing**, **Human-Like Behavior Algorithms**, **OLED Dashboard**, and **Physical Control Buttons**.
+A "undetectable" Bluetooth LE Mouse Jiggler based on the ESP32. This fork significantly upgrades the original project with **Hardware ID Spoofing**, **Human-Like Behavior Algorithms**, **OLED Dashboard**, and **Physical Control Buttons**.
 
 Designed to prevent screen locks in strict IT environments (< 5min timeouts) while remaining invisible to standard behavioral analysis tools.
 
