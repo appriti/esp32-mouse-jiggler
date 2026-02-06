@@ -2,158 +2,192 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <BleMouse.h>
-#include <BleKeyboard.h>
+#include <BleComboMouse.h>
+#include <BleComboKeyboard.h>
 
 // --- CONFIGURATION ---
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
+#define DEBUG_MODE    true
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT 32
 #define OLED_RESET    -1 
-#define BUTTON_PIN    0   // The BOOT button on most ESP32s
 
-// Stealth & ID Settings (Logitech MX Master 3 Spoof)
-#define DEVICE_NAME   "MX Master 3" 
+// --- BUTTON PINS ---
+#define BUTTON_PAUSE   5   // Toggle Standby
+#define BUTTON_TRIGGER 27  // Force Immediate Action
+
+// Stealth & ID Settings
+#define DEVICE_NAME   "K400 Plus" 
 #define DEVICE_MANUF  "Logitech"
-#define HID_VID       0x046D
-#define HID_PID       0xB023
+#define BATTERY_LEVEL 84
 
 // --- GLOBAL OBJECTS ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-BleMouse bleMouse(DEVICE_NAME, DEVICE_MANUF, 100);
-BleKeyboard bleKeyboard(DEVICE_NAME, DEVICE_MANUF, 100);
+BleComboKeyboard bleKeyboard(DEVICE_NAME, DEVICE_MANUF, BATTERY_LEVEL);
+BleComboMouse bleMouse(&bleKeyboard);
 
 // --- STATE TRACKING ---
 unsigned long lastActionTime = 0;
-unsigned long nextActionDelay = 5000; // Starts at 5 seconds
+unsigned long nextActionDelay = 5000;
 bool isPaused = false;
 unsigned long pauseEndTime = 0;
+String lastActionName = "None";
 
 void setup() {
-  // 1. Lower CPU speed to 80MHz for battery saving
+  if (DEBUG_MODE) {
+    Serial.begin(115200);
+    Serial.println("--- JIGGLER STARTING ---");
+  }
+
   setCpuFrequencyMhz(80);
 
-  // 2. Setup Screen
-  // Address 0x3C is standard for these generic OLEDs
+  // Initialize Screen
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
-    for(;;); // Don't proceed, loop forever if screen fails
+    if (DEBUG_MODE) Serial.println("Screen Failed!");
+    for(;;); 
   }
+  
+  display.setRotation(2); 
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
-  display.setCursor(0,0);
-  display.println("Initializing...");
-  display.println("Stealth Mode: ON");
+  display.setTextColor(SSD1306_WHITE);
   display.display();
 
-  // 3. Setup Bluetooth with Spoofed ID
-  // Note: Library handling of VID/PID happens internally or via BLEDevice config
-  // For standard BleMouse/Keyboard libs, we set the name which is the most visible part.
-  bleMouse.begin();
   bleKeyboard.begin();
+  bleMouse.begin();
   
-  // 4. Setup Button
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-
-  // Random seed from unconnected pin noise
+  // Initialize Physical Buttons
+  // INPUT_PULLUP means you wire the button between the PIN and GROUND.
+  pinMode(BUTTON_PAUSE, INPUT_PULLUP);
+  pinMode(BUTTON_TRIGGER, INPUT_PULLUP);
+  
   randomSeed(analogRead(34));
 }
 
-void updateScreen(String status, String action) {
+void updateScreen(String topStatus, String bottomAction) {
   display.clearDisplay();
-  
-  // Screensaver logic: Randomize text position slightly to prevent burn-in
-  int x = random(0, 10);
-  int y = random(0, 20);
-  
-  display.setCursor(x, y);
-  display.setTextSize(1);
-  display.println("Running: " + String(DEVICE_NAME));
-  
-  display.setCursor(x, y + 15);
-  display.println("Status: " + status);
-  
-  display.setCursor(x, y + 30);
-  display.println("Last: " + action);
-
-  // Battery simulation (Visual only)
-  display.setCursor(x, y + 45);
-  display.println("Battery: Optimal");
-  
+  display.setCursor(0, 0);
+  display.print(topStatus);
+  display.setCursor(0, 16);
+  display.print("> " + bottomAction);
   display.display();
 }
 
 void performAction() {
-  if (!bleMouse.isConnected()) return;
+  if (!bleKeyboard.isConnected()) return;
 
   int choice = random(0, 100);
-  String actionName = "";
-
+  
   if (choice < 70) {
-    // 70% Chance: Micro Mouse Jiggle
-    // Move slightly, wait briefly, move back (Zero-sum movement)
-    int xMove = random(-2, 3); // -2 to +2
+    int xMove = random(-2, 3);
     int yMove = random(-2, 3);
-    
     bleMouse.move(xMove, yMove);
-    delay(random(50, 150)); // Tiny human-like micro-pause
-    bleMouse.move(-xMove, -yMove); // Return to start
-    
-    actionName = "Mouse Micro-Move";
+    delay(100); 
+    bleMouse.move(-xMove, -yMove); 
+    lastActionName = "Micro-Jiggle";
   } 
   else if (choice < 90) {
-    // 20% Chance: Ghost Key Press (F15)
-    // F15 is rarely used by apps but registers as activity
     bleKeyboard.write(KEY_F15);
-    actionName = "Key: F15";
+    lastActionName = "Pressed F15";
   }
   else {
-    // 10% Chance: Mouse Scroll
-    // Scrolling 1 unit is very subtle
     bleMouse.move(0, 0, random(-1, 2)); 
-    actionName = "Mouse Scroll";
+    lastActionName = "Mouse Scroll";
   }
 
-  updateScreen("Active", actionName);
+  if (DEBUG_MODE) {
+    Serial.print("[ACTION] ");
+    Serial.println(lastActionName);
+  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Connection Check
-  if (!bleMouse.isConnected()) {
-    updateScreen("Disconnected", "Waiting for PC...");
-    delay(1000);
+  // --- BUTTON 1: PAUSE TOGGLE (Pin 5) ---
+  if (digitalRead(BUTTON_PAUSE) == LOW) {
+    delay(50); // Debounce
+    if (digitalRead(BUTTON_PAUSE) == LOW) {
+      isPaused = !isPaused; 
+      
+      if (isPaused) {
+        // Manual Pause (Indefinite)
+        pauseEndTime = currentMillis + 36000000; 
+        updateScreen("STATUS: STANDBY", "Manual Pause");
+        if (DEBUG_MODE) Serial.println("[MANUAL] User paused device.");
+      } else {
+        // Resume
+        pauseEndTime = 0; 
+        lastActionTime = currentMillis; 
+        nextActionDelay = 2000; // Act quickly after resuming
+        updateScreen("STATUS: ACTIVE", "Resuming...");
+        if (DEBUG_MODE) Serial.println("[MANUAL] User resumed device.");
+      }
+      while(digitalRead(BUTTON_PAUSE) == LOW) { delay(10); } 
+    }
+  }
+
+  // --- BUTTON 2: FORCE TRIGGER (Pin 27) ---
+  if (digitalRead(BUTTON_TRIGGER) == LOW && !isPaused) {
+     delay(50);
+     if (digitalRead(BUTTON_TRIGGER) == LOW) {
+       updateScreen("STATUS: FORCED", "Triggering...");
+       performAction();
+       lastActionTime = currentMillis; // Reset timer
+       // Wait a moment so we don't spam 50 clicks
+       while(digitalRead(BUTTON_TRIGGER) == LOW) { delay(10); }
+     }
+  }
+
+  // --- CONNECTION CHECK ---
+  if (!bleKeyboard.isConnected()) {
+    if (currentMillis % 2000 < 1000) updateScreen("STATUS: WAITING", "Pairing...");
+    else updateScreen("STATUS: WAITING", ""); 
+    delay(100);
     return;
   }
 
-  // 2. Pause Logic (Simulating "Thinking" or Reading)
+  // --- PAUSE LOGIC ---
   if (isPaused) {
     if (currentMillis > pauseEndTime) {
       isPaused = false;
-      updateScreen("Resuming...", "Work Mode");
+      lastActionTime = currentMillis; 
     } else {
-      // Just update screen occasionally during pause
-      if (currentMillis % 5000 < 100) updateScreen("Idling...", "Human Break");
+      // If manually paused, just show STANDBY
+      // If auto-break paused, show countdown
+      long remaining = (pauseEndTime - currentMillis) / 1000;
+      if (remaining > 3600) {
+         // It's a manual pause (huge number)
+         if (currentMillis % 2000 == 0) updateScreen("STATUS: STANDBY", "Manual Pause");
+      } else {
+         // It's a random break
+         if (currentMillis % 1000 < 50) updateScreen("STATUS: PAUSED", "Break: " + String(remaining) + "s");
+      }
       return; 
     }
   }
 
-  // 3. Trigger Action
+  // --- TIMER LOGIC ---
   if (currentMillis - lastActionTime > nextActionDelay) {
     performAction();
     lastActionTime = currentMillis;
     
-    // Set next delay: Random between 10 seconds and 3 minutes
-    // This irregularity makes it harder to detect than a fixed "every 60s" loop.
-    nextActionDelay = random(10000, 180000); 
+    // SAFE TIMING: 30s to 2.5 mins (Beats 5 min lock)
+    nextActionDelay = random(30000, 150000); 
 
-    // 4. Randomly decide to take a "Break" (simulated idle time)
-    // 5% chance after every action to pause for 1-5 minutes
+    // 5% Chance of short Auto-Break (1-2 mins)
     if (random(0, 100) < 5) {
       isPaused = true;
-      long breakDuration = random(60000, 300000); // 1 to 5 minutes
+      long breakDuration = random(60000, 120000); 
       pauseEndTime = currentMillis + breakDuration;
-      updateScreen("Taking Break", String(breakDuration/1000) + "s");
     }
+  }
+
+  // --- UI UPDATE ---
+  static unsigned long lastScreenUpdate = 0;
+  if (currentMillis - lastScreenUpdate > 1000) {
+    long timeLeft = (nextActionDelay - (currentMillis - lastActionTime)) / 1000;
+    if (timeLeft < 0) timeLeft = 0; 
+    updateScreen("Next: " + String(timeLeft) + "s", lastActionName);
+    lastScreenUpdate = currentMillis;
   }
 }
