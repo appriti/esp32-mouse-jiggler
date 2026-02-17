@@ -6,19 +6,22 @@
 #include <BleComboKeyboard.h>
 
 // --- CONFIGURATION ---
-#define DEBUG_MODE    true
-#define SCREEN_WIDTH  128
-#define SCREEN_HEIGHT 32
-#define OLED_RESET    -1 
+#define DEBUG_MODE      true
+#define SCREEN_WIDTH    128
+#define SCREEN_HEIGHT   32
+#define OLED_RESET      -1 
 
 // --- BUTTON PINS ---
-#define BUTTON_PAUSE   5   // Toggle Standby
-#define BUTTON_TRIGGER 27  // Force Immediate Action
+#define BUTTON_PAUSE    5   
+#define BUTTON_TRIGGER  27  
+
+// --- TIMING SETTINGS ---
+#define RESTART_TIMEOUT 60000 // Restart after 60s of disconnection
 
 // Stealth & ID Settings
-#define DEVICE_NAME   "K400 Plus" 
-#define DEVICE_MANUF  "Logitech"
-#define BATTERY_LEVEL 84
+#define DEVICE_NAME     "K400 Plus" 
+#define DEVICE_MANUF    "Logitech"
+#define BATTERY_LEVEL   84
 
 // --- GLOBAL OBJECTS ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -31,6 +34,9 @@ unsigned long nextActionDelay = 5000;
 bool isPaused = false;
 unsigned long pauseEndTime = 0;
 String lastActionName = "None";
+
+// New: Track how long we've been disconnected
+unsigned long disconnectStartTime = 0; 
 
 void setup() {
   if (DEBUG_MODE) {
@@ -55,8 +61,6 @@ void setup() {
   bleKeyboard.begin();
   bleMouse.begin();
   
-  // Initialize Physical Buttons
-  // INPUT_PULLUP means you wire the button between the PIN and GROUND.
   pinMode(BUTTON_PAUSE, INPUT_PULLUP);
   pinMode(BUTTON_TRIGGER, INPUT_PULLUP);
   
@@ -103,47 +107,66 @@ void performAction() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // --- BUTTON 1: PAUSE TOGGLE (Pin 5) ---
+  // --- BUTTON 1: PAUSE TOGGLE ---
   if (digitalRead(BUTTON_PAUSE) == LOW) {
-    delay(50); // Debounce
+    delay(50); 
     if (digitalRead(BUTTON_PAUSE) == LOW) {
       isPaused = !isPaused; 
       
       if (isPaused) {
-        // Manual Pause (Indefinite)
         pauseEndTime = currentMillis + 36000000; 
         updateScreen("STATUS: STANDBY", "Manual Pause");
-        if (DEBUG_MODE) Serial.println("[MANUAL] User paused device.");
       } else {
-        // Resume
         pauseEndTime = 0; 
         lastActionTime = currentMillis; 
-        nextActionDelay = 2000; // Act quickly after resuming
+        nextActionDelay = 2000; 
         updateScreen("STATUS: ACTIVE", "Resuming...");
-        if (DEBUG_MODE) Serial.println("[MANUAL] User resumed device.");
       }
       while(digitalRead(BUTTON_PAUSE) == LOW) { delay(10); } 
     }
   }
 
-  // --- BUTTON 2: FORCE TRIGGER (Pin 27) ---
+  // --- BUTTON 2: FORCE TRIGGER ---
   if (digitalRead(BUTTON_TRIGGER) == LOW && !isPaused) {
      delay(50);
      if (digitalRead(BUTTON_TRIGGER) == LOW) {
        updateScreen("STATUS: FORCED", "Triggering...");
        performAction();
-       lastActionTime = currentMillis; // Reset timer
-       // Wait a moment so we don't spam 50 clicks
+       lastActionTime = currentMillis; 
        while(digitalRead(BUTTON_TRIGGER) == LOW) { delay(10); }
      }
   }
 
-  // --- CONNECTION CHECK ---
+  // --- CONNECTION CHECK & AUTO-RESTART ---
   if (!bleKeyboard.isConnected()) {
-    if (currentMillis % 2000 < 1000) updateScreen("STATUS: WAITING", "Pairing...");
-    else updateScreen("STATUS: WAITING", ""); 
+    // 1. Start the disconnection timer if not already started
+    if (disconnectStartTime == 0) {
+      disconnectStartTime = currentMillis;
+    }
+    
+    // 2. Calculate time waiting
+    unsigned long timeDisconnected = currentMillis - disconnectStartTime;
+    long timeToRestart = (RESTART_TIMEOUT - timeDisconnected) / 1000;
+    
+    // 3. Update Screen with Countdown
+    if (timeToRestart > 0) {
+      if (currentMillis % 1000 < 100) {
+        updateScreen("STATUS: WAITING", "Reset in " + String(timeToRestart) + "s");
+        if (DEBUG_MODE) Serial.println("Waiting for connection...");
+      }
+    } else {
+      // 4. TIMEOUT REACHED -> REBOOT
+      updateScreen("STATUS: REBOOT", "Fixing Bluetooth...");
+      delay(1000);
+      if (DEBUG_MODE) Serial.println("Rebooting to fix connection...");
+      ESP.restart(); // <--- The Magic Fix
+    }
+    
     delay(100);
     return;
+  } else {
+    // We are connected, reset the timer
+    disconnectStartTime = 0; 
   }
 
   // --- PAUSE LOGIC ---
@@ -152,14 +175,10 @@ void loop() {
       isPaused = false;
       lastActionTime = currentMillis; 
     } else {
-      // If manually paused, just show STANDBY
-      // If auto-break paused, show countdown
       long remaining = (pauseEndTime - currentMillis) / 1000;
       if (remaining > 3600) {
-         // It's a manual pause (huge number)
          if (currentMillis % 2000 == 0) updateScreen("STATUS: STANDBY", "Manual Pause");
       } else {
-         // It's a random break
          if (currentMillis % 1000 < 50) updateScreen("STATUS: PAUSED", "Break: " + String(remaining) + "s");
       }
       return; 
@@ -171,10 +190,8 @@ void loop() {
     performAction();
     lastActionTime = currentMillis;
     
-    // SAFE TIMING: 30s to 2.5 mins (Beats 5 min lock)
     nextActionDelay = random(30000, 150000); 
 
-    // 5% Chance of short Auto-Break (1-2 mins)
     if (random(0, 100) < 5) {
       isPaused = true;
       long breakDuration = random(60000, 120000); 
